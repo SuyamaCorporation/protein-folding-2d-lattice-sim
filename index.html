@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>タンパク質2D格子折り畳みシミュレーション</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+<div class="max-w-4xl mx-auto p-4">
+  <h1 class="text-2xl font-bold text-center mb-2 text-cyan-400">タンパク質2D格子折り畳みシミュレーション</h1>
+  <p class="text-center text-gray-400 text-sm mb-4">HP（疎水性/親水性）モデルでアミノ酸配列を折り畳む</p>
+
+  <div class="bg-gray-800 rounded-xl p-4 mb-4">
+    <label class="block text-sm text-gray-300 mb-1" for="sequence">アミノ酸配列（H=疎水性, P=親水性）</label>
+    <div class="flex gap-2 flex-wrap">
+      <input id="sequence" type="text" value="HPHPPHHPHPPHPH" maxlength="20"
+        class="flex-1 bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white uppercase tracking-widest"
+        aria-label="アミノ酸配列入力" placeholder="例: HPHPPHHPHPPH">
+      <button id="btnFold" class="bg-cyan-600 hover:bg-cyan-500 px-4 py-2 rounded font-semibold transition-colors" aria-label="折り畳み開始">折り畳む</button>
+      <button id="btnReset" class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded transition-colors" aria-label="リセット">リセット</button>
+    </div>
+    <div class="flex gap-4 mt-2 text-sm flex-wrap">
+      <span>プリセット:</span>
+      <button class="preset text-cyan-400 hover:underline" data-seq="HPHPPHHPHPPH">12mer</button>
+      <button class="preset text-cyan-400 hover:underline" data-seq="HHHPPHHHPPHH">α型</button>
+      <button class="preset text-cyan-400 hover:underline" data-seq="PHPPHPPHHPPHP">β型</button>
+      <button class="preset text-cyan-400 hover:underline" data-seq="HHPPHHPPHHPP">交互型</button>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+    <div class="bg-gray-800 rounded-xl p-3 text-center">
+      <div class="text-gray-400 text-xs mb-1">エネルギースコア</div>
+      <div id="energyScore" class="text-3xl font-bold text-green-400">0</div>
+      <div class="text-gray-400 text-xs">H-H接触数（大きいほど良い）</div>
+    </div>
+    <div class="bg-gray-800 rounded-xl p-3 text-center">
+      <div class="text-gray-400 text-xs mb-1">探索ステップ</div>
+      <div id="stepCount" class="text-3xl font-bold text-yellow-400">0</div>
+    </div>
+    <div class="bg-gray-800 rounded-xl p-3 text-center">
+      <div class="text-gray-400 text-xs mb-1">配列長</div>
+      <div id="seqLen" class="text-3xl font-bold text-purple-400">0</div>
+    </div>
+  </div>
+
+  <div class="bg-gray-800 rounded-xl p-4 mb-4 flex justify-center">
+    <canvas id="canvas" width="500" height="500" class="rounded-lg" style="max-width:100%;height:auto;" aria-label="タンパク質折り畳みキャンバス"></canvas>
+  </div>
+
+  <div class="bg-gray-800 rounded-xl p-4 mb-4">
+    <div class="flex items-center gap-4 mb-2">
+      <label class="text-sm text-gray-300">アニメーション速度</label>
+      <input id="speed" type="range" min="1" max="10" value="5" class="flex-1" aria-label="アニメーション速度">
+      <span id="speedVal" class="text-sm text-gray-400 w-6">5</span>
+    </div>
+    <div id="statusMsg" class="text-sm text-center text-gray-400 h-5"></div>
+  </div>
+
+  <div class="bg-gray-800 rounded-xl p-4">
+    <h2 class="text-sm font-semibold text-gray-300 mb-2">凡例</h2>
+    <div class="flex gap-6 text-sm flex-wrap">
+      <span class="flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-full bg-red-500"></span>H（疎水性）</span>
+      <span class="flex items-center gap-2"><span class="inline-block w-4 h-4 rounded-full bg-blue-400"></span>P（親水性）</span>
+      <span class="flex items-center gap-2"><span class="inline-block w-4 h-4 bg-yellow-400 opacity-30"></span>H-H接触（エネルギー形成）</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const CELL = 32;
+const GRID_OFFSET = 2;
+
+let currentConformation = null;
+let animTimer = null;
+let stepHistory = [];
+let animIdx = 0;
+let isAnimating = false;
+
+const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+
+function parseSeq(s) {
+  return s.toUpperCase().replace(/[^HP]/g,'').split('');
+}
+
+function getEnergy(coords, seq) {
+  let e = 0;
+  const grid = new Map();
+  for (let i = 0; i < coords.length; i++) {
+    grid.set(coords[i][0]+','+coords[i][1], {idx:i, type:seq[i]});
+  }
+  for (let i = 0; i < coords.length; i++) {
+    if (seq[i] !== 'H') continue;
+    for (const [dx,dy] of dirs) {
+      const key = (coords[i][0]+dx)+','+(coords[i][1]+dy);
+      if (grid.has(key)) {
+        const nb = grid.get(key);
+        if (nb.idx > i+1 && seq[nb.idx] === 'H') e++;
+      }
+    }
+  }
+  return e;
+}
+
+function greedyFold(seq) {
+  const history = [];
+  const coords = [[0,0]];
+  const occupied = new Set(['0,0']);
+
+  history.push(coords.map(c=>[...c]));
+
+  for (let i = 1; i < seq.length; i++) {
+    const last = coords[coords.length-1];
+    let best = null, bestE = -1;
+    const shuffled = dirs.map(d=>[...d]).sort(()=>Math.random()-0.5);
+    for (const [dx,dy] of shuffled) {
+      const nx = last[0]+dx, ny = last[1]+dy;
+      const key = nx+','+ny;
+      if (!occupied.has(key)) {
+        const test = [...coords, [nx,ny]];
+        const e = getEnergy(test, seq.slice(0,i+1));
+        if (e > bestE) { bestE = e; best = [nx,ny]; }
+      }
+    }
+    if (!best) {
+      // backtrack once
+      for (const [dx,dy] of dirs) {
+        const nx = last[0]+dx, ny = last[1]+dy;
+        if (!occupied.has(nx+','+ny)) { best=[nx,ny]; break; }
+      }
+    }
+    if (!best) break;
+    coords.push(best);
+    occupied.add(best[0]+','+best[1]);
+    history.push(coords.map(c=>[...c]));
+  }
+  return history;
+}
+
+function normalize(coords) {
+  const xs = coords.map(c=>c[0]);
+  const ys = coords.map(c=>c[1]);
+  const minX = Math.min(...xs), minY = Math.min(...ys);
+  const maxX = Math.max(...xs), maxY = Math.max(...ys);
+  const cx = (minX+maxX)/2, cy = (minY+maxY)/2;
+  return coords.map(c=>[c[0]-cx, c[1]-cy]);
+}
+
+function drawConformation(coords, seq, partial) {
+  ctx.clearRect(0,0,W,H);
+
+  // dark background
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0,0,W,H);
+
+  if (!coords || coords.length === 0) return;
+
+  const norm = normalize(coords);
+  const scale = CELL;
+  const ox = W/2, oy = H/2;
+
+  // Find H-H contacts
+  const grid = new Map();
+  for (let i = 0; i < norm.length; i++) {
+    grid.set(Math.round(norm[i][0])+','+Math.round(norm[i][1]), {idx:i, type:seq[i]});
+  }
+
+  // Draw H-H contact highlights
+  for (let i = 0; i < norm.length; i++) {
+    if (seq[i] !== 'H') continue;
+    for (const [dx,dy] of dirs) {
+      const key = Math.round(norm[i][0]+dx)+','+Math.round(norm[i][1]+dy);
+      if (grid.has(key)) {
+        const nb = grid.get(key);
+        if (nb.idx > i+1 && seq[nb.idx] === 'H') {
+          const mx = ox + (norm[i][0]+dx/2)*scale;
+          const my = oy + (norm[i][1]+dy/2)*scale;
+          ctx.fillStyle = 'rgba(255,220,0,0.15)';
+          ctx.beginPath();
+          ctx.arc(mx, my, scale*0.7, 0, Math.PI*2);
+          ctx.fill();
+        }
+      }
+    }
+  }
+
+  // Draw bonds
+  ctx.strokeStyle = '#888';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let i = 0; i < norm.length-1; i++) {
+    const x1 = ox + norm[i][0]*scale;
+    const y1 = oy + norm[i][1]*scale;
+    const x2 = ox + norm[i+1][0]*scale;
+    const y2 = oy + norm[i+1][1]*scale;
+    ctx.moveTo(x1,y1);
+    ctx.lineTo(x2,y2);
+  }
+  ctx.stroke();
+
+  // Draw nodes
+  for (let i = 0; i < norm.length; i++) {
+    const x = ox + norm[i][0]*scale;
+    const y = oy + norm[i][1]*scale;
+    const isH = seq[i] === 'H';
+    const r = 10;
+
+    ctx.beginPath();
+    ctx.arc(x,y,r,0,Math.PI*2);
+    if (isH) {
+      const grad = ctx.createRadialGradient(x-2,y-2,2,x,y,r);
+      grad.addColorStop(0,'#ff7777');
+      grad.addColorStop(1,'#cc2222');
+      ctx.fillStyle = grad;
+    } else {
+      const grad = ctx.createRadialGradient(x-2,y-2,2,x,y,r);
+      grad.addColorStop(0,'#77bbff');
+      grad.addColorStop(1,'#2255cc');
+      ctx.fillStyle = grad;
+    }
+    ctx.fill();
+    ctx.strokeStyle = isH ? '#ff9999':'#99ccff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // label
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(seq[i], x, y);
+
+    // index
+    ctx.fillStyle = 'rgba(200,200,200,0.5)';
+    ctx.font = '7px monospace';
+    ctx.fillText(i+1, x+12, y-10);
+  }
+}
+
+function runAnimation(seq) {
+  const history = greedyFold(seq);
+  stepHistory = history;
+  animIdx = 0;
+  isAnimating = true;
+
+  document.getElementById('seqLen').textContent = seq.length;
+  document.getElementById('statusMsg').textContent = '探索中...';
+
+  const speed = parseInt(document.getElementById('speed').value);
+  const delay = Math.max(50, 500 - speed*45);
+
+  function step() {
+    if (animIdx >= stepHistory.length) {
+      isAnimating = false;
+      const final = stepHistory[stepHistory.length-1];
+      const e = getEnergy(final, seq);
+      document.getElementById('energyScore').textContent = e;
+      document.getElementById('statusMsg').textContent = '完了！エネルギー最小化配座を表示中';
+      currentConformation = final;
+      return;
+    }
+    const coords = stepHistory[animIdx];
+    document.getElementById('stepCount').textContent = animIdx;
+    drawConformation(coords, seq, true);
+    animIdx++;
+    animTimer = setTimeout(step, delay);
+  }
+  step();
+}
+
+document.getElementById('btnFold').addEventListener('click', () => {
+  if (animTimer) clearTimeout(animTimer);
+  const raw = document.getElementById('sequence').value;
+  const seq = parseSeq(raw);
+  if (seq.length < 3) { document.getElementById('statusMsg').textContent = '配列は3文字以上必要です'; return; }
+  document.getElementById('energyScore').textContent = '0';
+  document.getElementById('stepCount').textContent = '0';
+  runAnimation(seq);
+});
+
+document.getElementById('btnReset').addEventListener('click', () => {
+  if (animTimer) clearTimeout(animTimer);
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0,0,W,H);
+  document.getElementById('energyScore').textContent = '0';
+  document.getElementById('stepCount').textContent = '0';
+  document.getElementById('statusMsg').textContent = '';
+});
+
+document.querySelectorAll('.preset').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.getElementById('sequence').value = btn.dataset.seq;
+  });
+});
+
+document.getElementById('speed').addEventListener('input', e => {
+  document.getElementById('speedVal').textContent = e.target.value;
+});
+
+// Initial draw
+ctx.fillStyle = '#1a1a2e';
+ctx.fillRect(0,0,W,H);
+ctx.fillStyle = '#444';
+ctx.font = '16px sans-serif';
+ctx.textAlign = 'center';
+ctx.fillText('「折り畳む」ボタンを押してください', W/2, H/2);
+
+// Load last sequence from localStorage
+const saved = localStorage.getItem('pf2d_seq');
+if (saved) document.getElementById('sequence').value = saved;
+
+document.getElementById('sequence').addEventListener('input', e => {
+  localStorage.setItem('pf2d_seq', e.target.value);
+});
+</script>
+</body>
+</html>
